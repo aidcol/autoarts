@@ -13,6 +13,7 @@ import sys
 
 import py5
 import numpy as np
+import pyaudio
 from PIL import Image
 from coloraide import Color
 
@@ -22,13 +23,21 @@ from rgbmatrix import RGBMatrix, RGBMatrixOptions
 # Dimensions for the LED matrix setup
 LED_ROWS = 32
 LED_COLS = 32
-LED_CHAIN_LENGTH = 2
+LED_CHAIN_LENGTH = 4
 LED_PARALLEL = 1
 
 # Parameters for the Processing sketch
 SKETCH_WIDTH = LED_COLS * LED_CHAIN_LENGTH
 SKETCH_HEIGHT = LED_ROWS * LED_PARALLEL
 FRAME_RATE = 60
+STEP_SIZE = 0.01
+
+# Audio processing parameters
+SAMPLE_RATE = 44100         # Hz
+FORMAT = pyaudio.paFloat32  # 32-bit floating point
+CHANNELS = 1                # Mono
+CHUNK_SIZE = 735            # Synchronized for 60fps (44100 / 60 ≈ 735)
+FFT_SIZE = 1024             # FFT size for spectral analysis
 
 
 class ColorMap:
@@ -109,6 +118,27 @@ class ColorMap:
     def get_frame(self, y_indices, x_indices):
         """Get a frame of the color map."""
         return self.cm[y_indices, x_indices]
+    
+
+class NoiseGenerator:
+    """Generates OpenSimplex noise for use in animation with ColorMap."""
+
+    def __init__(self, height, width, range=2, step_size=0.05):
+        self.xx, self.yy = np.meshgrid(
+            np.linspace(0, range, num=width, dtype=np.float32),
+            np.linspace(0, range, num=height, dtype=np.float32)
+        )
+        self.tt = np.zeros((1,), dtype=np.float32)
+        self.time = 0.0
+        self.step_size = step_size
+    
+    def get_frame(self):
+        self.time += self.step_size
+        self.tt[0] = self.time
+
+        return py5.os_noise(
+            self.xx, self.yy, self.tt.reshape(1,1,1)
+        ).squeeze()
 
 
 class Display():
@@ -170,15 +200,28 @@ matrix = Display(options=options)
 
 # Simplex noise parameters
 t = 0.0                 # initial time
-increment = 0.05        # time step
 
 # Configure ColorMap
 colormap = ColorMap.default()
-xx, yy = np.meshgrid(
-    np.linspace(0, 2, num=SKETCH_WIDTH, dtype=np.float32),
-    np.linspace(0, 2, num=SKETCH_HEIGHT, dtype=np.float32)
-)
-tt = np.zeros((1,), dtype=np.float32)
+noise_generator = NoiseGenerator(SKETCH_HEIGHT, SKETCH_WIDTH)
+
+
+def create_frame(scale_factor=3, sigmaY=1):
+    global t
+    t += STEP_SIZE
+    
+    # Get audio data
+    energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * np.abs(np.sin(t))
+
+    # Get noise data
+    noise = noise_generator.get_frame()
+
+    # Map noise and energy to color
+    y_indices = py5.remap(noise, -1, 1, 0, SKETCH_HEIGHT - 1).astype(int)
+    x_indices = py5.remap(energy, 0, 1, 0, SKETCH_WIDTH - 1).astype(int)
+    out = colormap.get_frame(y_indices, x_indices)
+
+    return out
 
 
 def setup():
@@ -190,22 +233,12 @@ def setup():
 
 def draw():
     """Processing draw function (called for each frame)."""
-    global t, tt
-
-    tt[0] = t
-
-    noise = py5.os_noise(xx, yy, tt).squeeze()
-    energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * np.abs(np.sin(t))
-    y_indices = py5.remap(noise, -1, 1, 0, SKETCH_HEIGHT - 1).astype(int)
-    x_indices = py5.remap(energy, -1, 1, 0, SKETCH_WIDTH - 1).astype(int)
-    out = colormap.get_frame(y_indices, x_indices)
+    out = create_frame()
 
     py5.set_np_pixels(out, bands='RGB')
 
     py5.load_np_pixels()
     matrix.update(py5.np_pixels)
-
-    t += increment
 
 
 if __name__ == '__main__':
