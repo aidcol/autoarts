@@ -12,18 +12,20 @@ the LED matrices.
 import sys
 
 import py5
-import numpy as np
 import pyaudio
+import numpy as np
 from PIL import Image
 from coloraide import Color
 
-from rgbmatrix import RGBMatrix, RGBMatrixOptions
+# from rgbmatrix import RGBMatrix, RGBMatrixOptions
+from samplebase import SampleBase
+from sound import AudioStream, AudioAnalyzer
 
 
 # Dimensions for the LED matrix setup
 LED_ROWS = 32
 LED_COLS = 32
-LED_CHAIN_LENGTH = 4
+LED_CHAIN_LENGTH = 1
 LED_PARALLEL = 1
 
 # Parameters for the Processing sketch
@@ -33,11 +35,11 @@ FRAME_RATE = 60
 STEP_SIZE = 0.01
 
 # Audio processing parameters
-SAMPLE_RATE = 44100         # Hz
-FORMAT = pyaudio.paFloat32  # 32-bit floating point
-CHANNELS = 1                # Mono
-CHUNK_SIZE = 735            # Synchronized for 60fps (44100 / 60 ≈ 735)
-FFT_SIZE = 1024             # FFT size for spectral analysis
+SAMPLE_RATE = 48000             # Hz
+FORMAT = pyaudio.paFloat32      # 32-bit floating point
+CHANNELS = 1                    # Mono
+CHUNK_SIZE = SAMPLE_RATE // 60   # Synchronized for 60fps
+FFT_SIZE = 1024                 # FFT size for spectral analysis
 
 
 class ColorMap:
@@ -141,7 +143,7 @@ class NoiseGenerator:
         ).squeeze()
 
 
-class Display():
+class Display(SampleBase):
     """A class representing the LED matrix setup.
     
     Attributes:
@@ -150,14 +152,16 @@ class Display():
             read/write image frames to display on the LEDs
     """
 
-    def __init__(self, options):
+    def __init__(self, *args, **kwargs):
         """Initializes the instance using the parameters in RGBMatrixOptions.
         
         Args:
             options: an RGBMatrixOptions object, which contains parameters
                 that specify the LED matrix configuration
         """
-        self.matrix = RGBMatrix(options = options)
+        self.matrix = None
+        super(Display, self).__init__(*args, **kwargs)
+        self.process()
         self.double_buffer = self.matrix.CreateFrameCanvas()
 
     def update(self, pixels):
@@ -173,37 +177,28 @@ class Display():
         self.double_buffer = self.matrix.SwapOnVSync(self.double_buffer)
 
 
-def generate_noise_frame(t):
-    """Sample a color image from the Simplex noise function.
-    
-    Args:
-        t (int): the time parameter to control the animation
-    """
-    xx, yy, zz, tt = np.meshgrid(
-        np.linspace(0, 2, num=SKETCH_WIDTH), 
-        np.linspace(0, 2, num=SKETCH_HEIGHT),
-        np.linspace(0, 1, num=3),
-        np.array([t])
-    )
-    frame = py5.remap(py5.os_noise(xx, yy, zz, tt), -1, 1, 0, 255)
-    return frame
-
-
 # Configure LED matrix
-options = RGBMatrixOptions()
-options.rows = LED_ROWS
-options.cols = LED_COLS
-options.chain_length = LED_CHAIN_LENGTH
-options.parallel = LED_PARALLEL
-options.gpio_slowdown = 4
-matrix = Display(options=options)
+# --led-rows=32 --led-cols=32 --led-slowdown-gpio=4 --led-no-hardware-pulse LED_NO_HARDWARE_PULSE --led-no-drop-privs
+matrix = Display()
 
 # Simplex noise parameters
-t = 0.0                 # initial time
-
-# Configure ColorMap
+t = 0.0
 colormap = ColorMap.default()
 noise_generator = NoiseGenerator(SKETCH_HEIGHT, SKETCH_WIDTH)
+
+# Audio
+audio_stream = AudioStream(
+    sample_rate=SAMPLE_RATE, 
+    chunk_size=CHUNK_SIZE, 
+    fft_size=FFT_SIZE, 
+    format=FORMAT, 
+    channels=CHANNELS
+)
+analyzer = AudioAnalyzer(
+    n_bins=SKETCH_WIDTH, 
+    sample_rate=SAMPLE_RATE,
+    fft_size=FFT_SIZE
+)
 
 
 def create_frame(scale_factor=3, sigmaY=1):
@@ -211,7 +206,10 @@ def create_frame(scale_factor=3, sigmaY=1):
     t += STEP_SIZE
     
     # Get audio data
-    energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * np.abs(np.sin(t))
+    # energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * np.abs(np.sin(t))
+    analyzer.update(audio_stream.buffer)
+    energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * analyzer.smoothed_spectrum[np.newaxis, :]
+    energy = np.power(energy, scale_factor)
 
     # Get noise data
     noise = noise_generator.get_frame()
@@ -228,20 +226,25 @@ def setup():
     """Processing setup function (called once)."""
     py5.size(SKETCH_WIDTH, SKETCH_HEIGHT)
     py5.frame_rate(FRAME_RATE)
+    audio_stream.start()
     print("Running animation...")
 
 
 def draw():
     """Processing draw function (called for each frame)."""
+    # Update audio buffer
+    audio_stream.update()
+
+    # Update display
     out = create_frame()
-
     py5.set_np_pixels(out, bands='RGB')
-
     py5.load_np_pixels()
     matrix.update(py5.np_pixels)
 
 
 if __name__ == '__main__':
+    print(f'{np.__version__=}')
+    
     # Run the animation
     try:
         print('Press CTRL-C to stop.')
