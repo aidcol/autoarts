@@ -53,7 +53,7 @@ class AudioStream:
 
 class AudioAnalyzer:
     """Logarithmic audio spectrum analyzer."""
-    def __init__(self, n_bins=256, min_freq=20, max_freq=20000, sample_rate=44100, fft_size=1024, window='hann', min_db=-60):
+    def __init__(self, n_bins=256, min_freq=20, max_freq=20000, sample_rate=44100, fft_size=1024, window='hann', min_db=-60, max_db=6):
         self.n_bins = n_bins
         self.min_freq = min_freq
         self.max_freq = max_freq
@@ -61,6 +61,7 @@ class AudioAnalyzer:
         self.fft_size = fft_size
         self.window = signal.get_window(window, fft_size)
         self.min_db = min_db
+        self.max_db = max_db
 
         self.fft_freqs = np.fft.rfftfreq(fft_size, d=1/sample_rate)
         self.log_freqs = self.create_log_frequency_bins(
@@ -73,6 +74,7 @@ class AudioAnalyzer:
         # Animation parameters
         self.alpha = 0.5
         self.smoothed_spectrum = np.zeros(n_bins)
+        self.bass_history = deque(maxlen=60)
 
     def create_log_frequency_bins(self, n_bins, min_freq=20, max_freq=20000, sample_rate=44100, fft_size=1024):
         """
@@ -125,18 +127,23 @@ class AudioAnalyzer:
 
         # Convert magnitude to dB scale
         log_db = 10 * np.log10(log_power + 1e-10)
-        log_db -= np.max(log_db)
-        log_db = np.clip(log_db, self.min_db, 0)
+        log_db = np.clip(log_db, self.min_db, self.max_db)
 
         # Reflect across y-axis for symmetry
         log_db = np.concatenate([log_db[::-1], log_db])
 
         # Normalize and update spectrum buffer
-        self.spectrum = (log_db - self.min_db) / -self.min_db
+        self.spectrum = (log_db - self.min_db) / (self.max_db - self.min_db)
+        self.spectrum = np.clip(self.spectrum, 0, 1)
         self.smoothed_spectrum = (
             self.alpha * self.smoothed_spectrum 
             + (1 - self.alpha) * self.spectrum
         )
+
+        # Update bass history
+        bass_band = self.smoothed_spectrum[:self.n_bins // 8]
+        bass_energy = np.mean(bass_band)
+        self.bass_history.append(bass_energy)
 
 
 if __name__ == '__main__':

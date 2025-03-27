@@ -25,20 +25,20 @@ from sound import AudioStream, AudioAnalyzer
 # Dimensions for the LED matrix setup
 LED_ROWS = 32
 LED_COLS = 32
-LED_CHAIN_LENGTH = 1
-LED_PARALLEL = 1
+LED_CHAIN_LENGTH = 2
+LED_PARALLEL = 2
 
 # Parameters for the Processing sketch
 SKETCH_WIDTH = LED_COLS * LED_CHAIN_LENGTH
 SKETCH_HEIGHT = LED_ROWS * LED_PARALLEL
 FRAME_RATE = 60
-STEP_SIZE = 0.01
+STEP_SIZE = 0.02
 
 # Audio processing parameters
 SAMPLE_RATE = 48000             # Hz
 FORMAT = pyaudio.paFloat32      # 32-bit floating point
 CHANNELS = 1                    # Mono
-CHUNK_SIZE = SAMPLE_RATE // 60   # Synchronized for 60fps
+CHUNK_SIZE = SAMPLE_RATE // 60  # Synchronized for 60fps
 FFT_SIZE = 1024                 # FFT size for spectral analysis
 
 
@@ -125,14 +125,29 @@ class ColorMap:
 class NoiseGenerator:
     """Generates OpenSimplex noise for use in animation with ColorMap."""
 
-    def __init__(self, height, width, range=2, step_size=0.05):
+    def __init__(self, height, width, range=2, step_size=0.05, recovery_rate=0.1, momentum_scale=0.005):
         self.xx, self.yy = np.meshgrid(
             np.linspace(0, range, num=width, dtype=np.float32),
             np.linspace(0, range, num=height, dtype=np.float32)
         )
         self.tt = np.zeros((1,), dtype=np.float32)
         self.time = 0.0
+        self.default_step_size = step_size
         self.step_size = step_size
+        self.velocity = 0.0  
+        self.recovery_rate = recovery_rate  
+        self.momentum_scale = momentum_scale  
+
+    def update_step_size(self, bass_energy, bass_threshold):
+        """Modify the time step size based on bass energy."""
+        if bass_energy > bass_threshold:  
+            # Push step size in the negative direction with proportional strength
+            self.velocity -= (bass_energy - bass_threshold) * self.momentum_scale
+            # print(f'{self.velocity=}')
+
+        # Apply momentum and smooth recovery
+        self.velocity += (self.default_step_size - self.step_size) * self.recovery_rate
+        self.step_size += self.velocity
     
     def get_frame(self):
         self.time += self.step_size
@@ -184,21 +199,21 @@ matrix = Display()
 # Simplex noise parameters
 t = 0.0
 colormap = ColorMap.default()
-noise_generator = NoiseGenerator(SKETCH_HEIGHT, SKETCH_WIDTH)
+noise_generator = NoiseGenerator(SKETCH_HEIGHT, 
+                                 SKETCH_WIDTH, 
+                                 step_size=STEP_SIZE)
 
 # Audio
-audio_stream = AudioStream(
-    sample_rate=SAMPLE_RATE, 
-    chunk_size=CHUNK_SIZE, 
-    fft_size=FFT_SIZE, 
-    format=FORMAT, 
-    channels=CHANNELS
-)
-analyzer = AudioAnalyzer(
-    n_bins=SKETCH_WIDTH, 
-    sample_rate=SAMPLE_RATE,
-    fft_size=FFT_SIZE
-)
+audio_stream = AudioStream(sample_rate=SAMPLE_RATE, 
+                           chunk_size=CHUNK_SIZE, 
+                           fft_size=FFT_SIZE, 
+                           format=FORMAT, 
+                           channels=CHANNELS,)
+analyzer = AudioAnalyzer(n_bins=SKETCH_WIDTH, 
+                         sample_rate=SAMPLE_RATE,
+                         fft_size=FFT_SIZE,
+                         min_db=-60,
+                         max_db=30,)
 
 
 def create_frame(scale_factor=3, sigmaY=1):
@@ -206,12 +221,14 @@ def create_frame(scale_factor=3, sigmaY=1):
     t += STEP_SIZE
     
     # Get audio data
-    # energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * np.abs(np.sin(t))
     analyzer.update(audio_stream.buffer)
     energy = np.ones((SKETCH_HEIGHT, SKETCH_WIDTH)) * analyzer.smoothed_spectrum[np.newaxis, :]
     energy = np.power(energy, scale_factor)
 
     # Get noise data
+    bass_avg = np.mean(analyzer.bass_history)
+    bass_threshold = bass_avg * 1.5 
+    noise_generator.update_step_size(analyzer.bass_history[-1], bass_threshold)
     noise = noise_generator.get_frame()
 
     # Map noise and energy to color
