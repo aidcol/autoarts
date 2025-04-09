@@ -53,7 +53,7 @@ class AudioStream:
 
 class AudioAnalyzer:
     """Logarithmic audio spectrum analyzer."""
-    def __init__(self, n_bins=256, min_freq=20, max_freq=20000, sample_rate=44100, fft_size=1024, window='hann', min_db=-60, max_db=6):
+    def __init__(self, n_bins=256, min_freq=20, max_freq=20000, sample_rate=44100, fft_size=1024, window='hann', min_db=-60, max_db=30):
         self.n_bins = n_bins
         self.min_freq = min_freq
         self.max_freq = max_freq
@@ -74,7 +74,17 @@ class AudioAnalyzer:
         # Animation parameters
         self.alpha = 0.5
         self.smoothed_spectrum = np.zeros(n_bins)
-        self.bass_history = deque(maxlen=60)
+
+        self.min_rms_threshold = 0.6
+
+        self.beat_band = self.get_band_indices(200, 1000)
+        self.beat_history = deque(maxlen=60)
+        self.beat_cooldown_frames = 20
+        self.beat_cooldown_counter = 0
+        self.beat_detected = False
+
+        self.chrom_aberration_strength = 0.0
+
 
     def create_log_frequency_bins(self, n_bins, min_freq=20, max_freq=20000, sample_rate=44100, fft_size=1024):
         """
@@ -99,6 +109,20 @@ class AudioAnalyzer:
         center_frequencies = np.sqrt(log_bin_edges[:-1] * log_bin_edges[1:])
 
         return center_frequencies
+    
+    def get_band_indices(self, low, high):
+        return np.where((self.log_freqs >= low) & (self.log_freqs <= high))[0]
+    
+    def compute_band_energy(self, spectrum, indices):
+        return np.mean(spectrum[indices]) if len(indices) > 0 else 0
+    
+    def detect_beat(self, energy, history, threshold):
+        if len(history) < history.maxlen:
+            history.append(energy)
+            return False
+        avg_energy = np.mean(history)
+        history.append(energy)
+        return energy > threshold * avg_energy
     
     def update(self, audio_data):
         """
@@ -139,11 +163,27 @@ class AudioAnalyzer:
             self.alpha * self.smoothed_spectrum 
             + (1 - self.alpha) * self.spectrum
         )
+        
+        beat_detected = False
+        overall_rms = np.sqrt(np.mean(self.spectrum ** 2))
+        if overall_rms > self.min_rms_threshold:
+            print(f'overall_rms: {overall_rms:.4f}')
+            beat_energy = self.compute_band_energy(self.spectrum, self.beat_band)
+            energy_history = np.mean(self.beat_history)
+            beat_threshold = energy_history * 1.8
+            beat_detected = self.detect_beat(beat_energy, self.beat_history, beat_threshold)
 
-        # Update bass history
-        bass_band = self.smoothed_spectrum[:self.n_bins // 8]
-        bass_energy = np.mean(bass_band)
-        self.bass_history.append(bass_energy)
+        if self.beat_cooldown_counter > 0:
+            self.beat_cooldown_counter -= 1
+
+        self.beat_detected = False
+
+        if self.beat_cooldown_counter == 0 and beat_detected:
+            self.beat_detected = True
+            self.beat_cooldown_counter = self.beat_cooldown_frames
+            self.chrom_aberration_strength = 1.0
+        
+        self.chrom_aberration_strength *= 0.8
 
 
 if __name__ == '__main__':

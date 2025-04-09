@@ -14,6 +14,7 @@ import sys
 import py5
 import pyaudio
 import numpy as np
+import cv2
 from PIL import Image
 from coloraide import Color
 
@@ -25,7 +26,7 @@ from sound import AudioStream, AudioAnalyzer
 # Dimensions for the LED matrix setup
 LED_ROWS = 32
 LED_COLS = 32
-LED_CHAIN_LENGTH = 2
+LED_CHAIN_LENGTH = 8
 LED_PARALLEL = 2
 
 # Parameters for the Processing sketch
@@ -137,17 +138,6 @@ class NoiseGenerator:
         self.velocity = 0.0  
         self.recovery_rate = recovery_rate  
         self.momentum_scale = momentum_scale  
-
-    def update_step_size(self, bass_energy, bass_threshold):
-        """Modify the time step size based on bass energy."""
-        if bass_energy > bass_threshold:  
-            # Push step size in the negative direction with proportional strength
-            self.velocity -= (bass_energy - bass_threshold) * self.momentum_scale
-            # print(f'{self.velocity=}')
-
-        # Apply momentum and smooth recovery
-        self.velocity += (self.default_step_size - self.step_size) * self.recovery_rate
-        self.step_size += self.velocity
     
     def get_frame(self):
         self.time += self.step_size
@@ -216,6 +206,19 @@ analyzer = AudioAnalyzer(n_bins=SKETCH_WIDTH,
                          max_db=30,)
 
 
+def shift_channel(img, dx, dy):
+    rows, cols = img.shape
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(img, M, (cols, rows), borderMode=cv2.BORDER_REFLECT)
+
+
+def chromatic_aberration_cv2(img, shift_r=(2, 0), shift_g=(0, 0), shift_b=(-2, 0)):
+    r = shift_channel(img[..., 0], *shift_r)
+    g = shift_channel(img[..., 1], *shift_g)
+    b = shift_channel(img[..., 2], *shift_b)
+    return np.stack([r, g, b], axis=-1)
+
+
 def create_frame(scale_factor=3, sigmaY=1):
     global t
     t += STEP_SIZE
@@ -226,15 +229,21 @@ def create_frame(scale_factor=3, sigmaY=1):
     energy = np.power(energy, scale_factor)
 
     # Get noise data
-    bass_avg = np.mean(analyzer.bass_history)
-    bass_threshold = bass_avg * 1.5 
-    noise_generator.update_step_size(analyzer.bass_history[-1], bass_threshold)
     noise = noise_generator.get_frame()
 
     # Map noise and energy to color
     y_indices = py5.remap(noise, -1, 1, 0, SKETCH_HEIGHT - 1).astype(int)
     x_indices = py5.remap(energy, 0, 1, 0, SKETCH_WIDTH - 1).astype(int)
     out = colormap.get_frame(y_indices, x_indices)
+
+    strength = analyzer.chrom_aberration_strength
+    if strength > 0.01:
+        print(f'{strength}')
+        max_shift = 50  # max pixels of chromatic aberration
+        shift_x = int(strength * max_shift)
+        shift_y = int(strength * max_shift)
+
+        out = chromatic_aberration_cv2(out, shift_r=(shift_x, shift_y), shift_b=(-shift_x, -shift_y))
 
     return out
 
